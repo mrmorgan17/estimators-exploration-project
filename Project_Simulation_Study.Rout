@@ -1,0 +1,187 @@
+
+R version 4.2.1 (2022-06-23) -- "Funny-Looking Kid"
+Copyright (C) 2022 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+  Natural language support but running in an English locale
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> library(dplyr)
+
+Attaching package: ‘dplyr’
+
+The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+> library(future.apply)
+Loading required package: future
+> 
+> log_prior <- function(r, p) {
++   dgamma(r, .01, .01, log = TRUE) + dbeta(p, .1, .1, log = TRUE)
++ }
+> 
+> log_likelihood <- function(r, p, y) {
++   ifelse(p <= 0 | p > 1 | r < 0, -Inf, sum(dnbinom(y, r, p, log = TRUE)))
++ }
+> 
+> log_posterior <- function(r, p, y) {
++   log_likelihood(r, p, y) + log_prior(r, p)
++ }
+> 
+> method_of_moments <- function(y) {
++   
++   r <- mean(y)^2 / (var(y) - mean(y))
++   
++   p <- mean(y) / var(y)
++   
++   return(c(r, p))
++   
++ }
+> 
+> nbinom_mcmc <- function(dat, iter) {
++   
++   draws <- data.frame(matrix(0, nrow = iter, ncol = 2))
++   
++   # Initial state
++   draws[1,] <- c(1, .1)
++   
++   for (i in 2:iter) {
++     
++     r <- draws[i - 1, 1]
++     p <- draws[i - 1, 2]
++     
++     # Propose rstar from a normal distribution centered at r
++     proposal <- rnorm(1, r, sd(dat))
++     
++     # Calculate the log Metropolis ratio
++     log_m_ratio <- ifelse(proposal <= 0, -Inf, log_posterior(proposal, p, dat) - log_posterior(r, p, dat))
++     
++     # Accept the proposal with the appropriate probability
++     r <- ifelse(log_m_ratio > log(runif(1)), proposal, r)
++     
++     # Gibbs update of p
++     # Full conditional is conjugate
++     p <- rbeta(1, .1 + r*length(dat), .1 + sum(dat))
++     
++     draws[i,] <- c(r, p)
++     
++   }
++   
++   return(draws)
++   
++ }
+> 
+> simulation_study <- function(n, true_r, true_p, nBootstrapSamples, nReplicates) {
++   
++   plan(multisession, workers = 8)
++   
++   dat <- rnbinom(n, true_r, true_p) # True "fake" data
++   
++   MLE_simulation_study <- data.frame(t(future_replicate(nReplicates, {
++     
++     bootstrap_MLE <- data.frame(t(future_replicate(nBootstrapSamples, {
++       
++       bootstrap_sample <- sample(dat, replace = TRUE)
++       
++       optim(c(1, .1), \(pars) -log_likelihood(pars[1], pars[2], bootstrap_sample))$par # better with more data points
++       
++     })))
++     
++     names(bootstrap_MLE) <- c("r", "p")
++     
++     c(
++       mean(bootstrap_MLE$r), # Point estimate
++       mean(bootstrap_MLE$r - true_r), # Bias
++       mean((bootstrap_MLE$r - true_r)^2), # MSE
++       between(true_r, quantile(bootstrap_MLE$r, .025), quantile(bootstrap_MLE$r, .975)), # Coverage
++       mean(bootstrap_MLE$p), # Point estimate
++       mean(bootstrap_MLE$p - true_p), # Bias
++       mean((bootstrap_MLE$p - true_p)^2), # MSE
++       between(true_p, quantile(bootstrap_MLE$p, .025), quantile(bootstrap_MLE$p, .975)) # Coverage
++     )
++     
++   })))
++   
++   MoM_simulation_study <- data.frame(t(future_replicate(nReplicates, {
++     
++     bootstrap_MoM <- data.frame(t(future_replicate(nBootstrapSamples, {
++       
++       bootstrap_sample <- sample(dat, replace = TRUE)
++       
++       method_of_moments(bootstrap_sample)
++       
++     })))
++     
++     names(bootstrap_MoM) <- c("r", "p")
++     
++     c(
++       mean(bootstrap_MoM$r), # Point estimate
++       mean(bootstrap_MoM$r - true_r), # Bias
++       mean((bootstrap_MoM$r - true_r)^2), # MSE
++       between(true_r, quantile(bootstrap_MoM$r, .025), quantile(bootstrap_MoM$r, .975)), # Coverage
++       mean(bootstrap_MoM$p), # Point estimate
++       mean(bootstrap_MoM$p - true_p), # Bias
++       mean((bootstrap_MoM$p - true_p)^2), # MSE
++       between(true_p, quantile(bootstrap_MoM$p, .025), quantile(bootstrap_MoM$p, .975)) # Coverage
++     )
++     
++   })))
++   
++   Bayes_simulation_study <- data.frame(t(future_replicate(nReplicates, {
++     
++     markov_chain <- nbinom_mcmc(dat, nBootstrapSamples)
++     
++     names(markov_chain) <- c("r", "p")
++     
++     c(
++       mean(markov_chain$r), # Point estimate
++       mean(markov_chain$r - true_r), # Bias
++       mean((markov_chain$r - true_r)^2), # MSE
++       between(true_r, quantile(markov_chain$r, .025), quantile(markov_chain$r, .975)), # Coverage
++       mean(markov_chain$p), # Point estimate
++       mean(markov_chain$p - true_p), # Bias
++       mean((markov_chain$p - true_p)^2), # MSE
++       between(true_p, quantile(markov_chain$p, .025), quantile(markov_chain$p, .975)) # Coverage
++     )
++     
++   })))
++   
++   simulation_study_df <- data.frame(rbind(
++     colMeans(MLE_simulation_study),
++     colMeans(MoM_simulation_study[!is.infinite(MoM_simulation_study$X1) & MoM_simulation_study$X1 > 0 & MoM_simulation_study$X5 >= 0 & MoM_simulation_study$X5 <= 1,]), # Rejecting the bootstrap simulations that returned an infinite estimated value for r
++     colMeans(Bayes_simulation_study)
++   ))
++   
++   names(simulation_study_df) <- c("r_est", "r_bias_avg", "r_mse_avg", "r_coverage", "p_est", "p_bias_avg", "p_mse_avg", "p_coverage")
++   
++   return(
++     list(
++       MLE_simulation_study,
++       MoM_simulation_study,
++       Bayes_simulation_study,
++       simulation_study_df,
++       nrow(MoM_simulation_study[is.infinite(MoM_simulation_study$X1) | MoM_simulation_study$X1 <= 0 | MoM_simulation_study$X5 < 0 | MoM_simulation_study$X5 > 1,])
++     )
++   )
++   
++ }
+> 
+> setting1_sim_study <- simulation_study(10, 5, .1, 1000, 1000)
+> setting2_sim_study <- simulation_study(100, 5, .1, 1000, 1000)
+> setting3_sim_study <- simulation_study(1000, 5, .1, 1000, 1000)
